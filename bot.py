@@ -16,6 +16,7 @@ import asyncpg
 from dotenv import load_dotenv
 from aiohttp import web
 import aiohttp
+from telegram.ext import Application
 
 # تنظیمات محیطی
 load_dotenv()
@@ -851,7 +852,8 @@ async def run_web_server():
     app.router.add_get('/health', health_check)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 10000)
+    port = int(os.getenv('PORT',10000))
+    site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
     logger.info("Web server started at port 10000")
     
@@ -865,7 +867,7 @@ async def run_web_server():
 
 async def run_telegram_bot():
     """اجرای اصلی ربات تلگرام"""
-    application = Application.builder().token(BOT_TOKEN).build()
+    application = Application.builder().token(BOT_TOKEN).updater(none).build()
     
     # دریافت یوزرنیم ربات
     await application.initialize()
@@ -929,8 +931,9 @@ async def run_telegram_bot():
     
     # اجرای ربات
     logger.info("Starting Telegram bot...")
+    await application.initialize()
     await application.start()
-    await application.updater.start_polling()
+    await application.run_polling()
     
     # نگه داشتن ربات در حالت اجرا
     while True:
