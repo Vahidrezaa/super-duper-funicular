@@ -867,7 +867,7 @@ async def run_web_server():
 
 async def run_telegram_bot():
     """اجرای اصلی ربات تلگرام"""
-    application = Application.builder().token(BOT_TOKEN).updater(none).build()
+    application = Application.builder().token(BOT_TOKEN).updater(None).build()
     
     # دریافت یوزرنیم ربات
     await application.initialize()
