@@ -1035,6 +1035,7 @@ async def setup_post_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.edit_message_text(
         "لطفاً نوع پیام پس از ارسال را انتخاب کنید:",
         reply_markup=InlineKeyboardMarkup(keyboard)
+    )
     return POST_MESSAGE_SETUP
 
 async def handle_post_message_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
