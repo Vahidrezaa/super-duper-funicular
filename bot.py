@@ -854,7 +854,7 @@ async def keep_alive():
 async def setup_bot():
     """تنظیم و اجرای ربات با Webhook"""
     # ایجاد برنامه تلگرام
-    application = Application.builder().token(BOT_TOKEN).build()
+    application = Application.builder().token(BOT_TOKEN).updater(None).post_init(post_init).build()
     
     # دریافت یوزرنیم ربات
     await application.initialize()
@@ -960,7 +960,8 @@ async def run_web_server():
 
 async def main():
     """اجرای اصلی برنامه"""
-    await run_web_server()
+    application = await setup_bot()
+    await run_web_server(application)
 
 if __name__ == '__main__':
     try:
