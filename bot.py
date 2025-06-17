@@ -58,8 +58,9 @@ BACK_MENU = ReplyKeyboardMarkup(
 # حالت‌های گفتگو
 (
     UPLOADING, WAITING_CHANNEL_INFO, AWAITING_CATEGORY_NAME,
-    POST_MESSAGE_SETUP, AWAITING_POST_MESSAGE, AWAITING_ADMIN_ID
-) = range(6)
+    POST_MESSAGE_SETUP, AWAITING_POST_MESSAGE, AWAITING_ADMIN_ID,
+    TIMER_SETTINGS
+) = range(7)
 
 class Database:
     """مدیریت دیتابیس PostgreSQL"""
@@ -133,10 +134,12 @@ class Database:
             # جدول پیام‌های پس از ارسال
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS post_messages (
-                    category_id TEXT PRIMARY KEY REFERENCES categories(id) ON DELETE CASCADE,
+                    id SERIAL PRIMARY KEY,
+                    category_id TEXT REFERENCES categories(id) ON DELETE CASCADE,
                     message_type TEXT NOT NULL,
                     content TEXT NOT NULL,
                     caption TEXT,
+                    is_global BOOLEAN DEFAULT FALSE,
                     created_at TIMESTAMP DEFAULT NOW()
                 )
             ''')
@@ -175,9 +178,12 @@ class Database:
                 "SELECT file_id, file_type, caption FROM files WHERE category_id = $1", category_id
             )
             
-            # دریافت پیام پس از ارسال
+            # دریافت پیام پس از ارسال (اولویت با پیام اختصاصی دسته)
             post_message = await conn.fetchrow(
-                "SELECT message_type, content, caption FROM post_messages WHERE category_id = $1", 
+                "SELECT message_type, content, caption FROM post_messages "
+                "WHERE category_id = $1 OR (is_global AND NOT EXISTS "
+                "(SELECT 1 FROM post_messages WHERE category_id = $1)) "
+                "ORDER BY is_global ASC LIMIT 1", 
                 category_id
             )
             
@@ -325,7 +331,7 @@ class Database:
         """حذف ادمین"""
         async with self.pool.acquire() as conn:
             await conn.execute(
-                "DELETE FROM admins WHERE user_id = $1",
+                "DELETE FROM admins WHERE user_id = $1 AND is_super = FALSE",
                 user_id
             )
     
@@ -351,19 +357,26 @@ class Database:
             return await conn.fetch("SELECT user_id, is_super FROM admins")
     
     # --- مدیریت پیام‌های پس از ارسال ---
-    async def set_post_message(self, category_id: str, message_type: str, content: str, caption: str = None):
-        """تنظیم پیام پس از ارسال برای دسته"""
+    async def set_post_message(self, category_id: str, message_type: str, content: str, caption: str = None, is_global: bool = False):
+        """تنظیم پیام پس از ارسال"""
         async with self.pool.acquire() as conn:
+            # حذف پیام قبلی اگر وجود دارد
+            if is_global:
+                await conn.execute("DELETE FROM post_messages WHERE is_global = TRUE")
+            else:
+                await conn.execute("DELETE FROM post_messages WHERE category_id = $1", category_id)
+            
+            # افزودن پیام جدید
             await conn.execute(
-                "INSERT INTO post_messages(category_id, message_type, content, caption) "
-                "VALUES($1, $2, $3, $4) "
-                "ON CONFLICT (category_id) DO UPDATE SET "
-                "message_type = EXCLUDED.message_type, "
-                "content = EXCLUDED.content, "
-                "caption = EXCLUDED.caption",
-                category_id, message_type, content, caption
+                "INSERT INTO post_messages(category_id, message_type, content, caption, is_global) "
+                "VALUES($1, $2, $3, $4, $5)",
+                None if is_global else category_id,
+                message_type,
+                content,
+                caption,
+                is_global
             )
-    
+
     async def delete_post_message(self, category_id: str):
         """حذف پیام پس از ارسال"""
         async with self.pool.acquire() as conn:
@@ -663,6 +676,10 @@ async def new_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def save_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = update.message.text.strip()
+    if name == "↩️ بازگشت به منوی اصلی":
+        await cancel(update, context)
+        return ConversationHandler.END
+    
     user_id = update.effective_user.id
     category_id = await bot_manager.db.add_category(name, user_id)
     link = bot_manager.generate_link(category_id)
@@ -681,44 +698,23 @@ async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ دسترسی ممنوع!")
         return
     
-    if not context.args:
-        # نمایش دسته‌های موجود برای انتخاب
-        categories = await bot_manager.db.get_categories()
-        if not categories:
-            await update.message.reply_text("❌ هیچ دسته‌ای وجود ندارد! ابتدا یک دسته ایجاد کنید.")
-            return
-        
-        keyboard = []
-        for cid, name in categories.items():
-            keyboard.append([InlineKeyboardButton(
-                f"📁 {name} (ID: {cid})", 
-                callback_data=f"upload_cat_{cid}"
-            )])
-        
-        await update.message.reply_text(
-            "لطفاً دسته مورد نظر را انتخاب کنید:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+    # نمایش دسته‌های موجود برای انتخاب
+    categories = await bot_manager.db.get_categories()
+    if not categories:
+        await update.message.reply_text("❌ هیچ دسته‌ای وجود ندارد! ابتدا یک دسته ایجاد کنید.")
         return
     
-    category_id = context.args[0]
-    category = await bot_manager.db.get_category(category_id)
-    if not category:
-        await update.message.reply_text("❌ دسته یافت نشد!")
-        return
-    
-    # ذخیره اطلاعات آپلود
-    context.user_data['upload'] = {
-        'category_id': category_id,
-        'files': []
-    }
+    keyboard = []
+    for cid, name in categories.items():
+        keyboard.append([InlineKeyboardButton(
+            f"📁 {name} (ID: {cid})", 
+            callback_data=f"upload_cat_{cid}"
+        )])
     
     await update.message.reply_text(
-        f"📤 حالت آپلود فعال شد! فایل‌ها را ارسال کنید.\n"
-        f"برای پایان: /finish_upload\n"
-        f"برای لغو: /cancel"
+        "لطفاً دسته مورد نظر را انتخاب کنید:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
-    return UPLOADING
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """پردازش فایل‌های ارسالی"""
@@ -1021,15 +1017,19 @@ async def setup_post_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     await query.answer()
     
-    category_id = query.data.split('_')[1]
-    context.user_data['post_message'] = {'category_id': category_id}
+    if '_' in query.data:
+        category_id = query.data.split('_')[1]
+        context.user_data['post_message'] = {'category_id': category_id}
+    else:
+        context.user_data['post_message'] = {'is_global': True}
     
     keyboard = [
         [InlineKeyboardButton("📝 متن", callback_data="post_text")],
         [InlineKeyboardButton("🖼 عکس", callback_data="post_photo")],
         [InlineKeyboardButton("🎥 ویدیو", callback_data="post_video")],
         [InlineKeyboardButton("📄 سند", callback_data="post_document")],
-        [InlineKeyboardButton("🗑 حذف پیام", callback_data=f"delpost_{category_id}")]
+        [InlineKeyboardButton("🌐 پیام سراسری", callback_data="global_post")],
+        [InlineKeyboardButton("🗑 حذف پیام", callback_data="del_post")]
     ]
     
     await query.edit_message_text(
@@ -1042,20 +1042,42 @@ async def handle_post_message_type(update: Update, context: ContextTypes.DEFAULT
     """پردازش نوع پیام پس از ارسال"""
     query = update.callback_query
     await query.answer()
+    data = query.data
     
-    action = query.data
-    context.user_data['post_message']['type'] = action.split('_')[1]
-    
-    if action.startswith('delpost'):
-        category_id = action.split('_')[1]
-        await bot_manager.db.delete_post_message(category_id)
+    if data == "global_post":
+        context.user_data['post_message']['is_global'] = True
         await query.edit_message_text(
-            "✅ پیام پس از ارسال حذف شد!",
-            reply_markup=MAIN_MENU
+            "🌐 حالت تنظیم پیام سراسری فعال شد!\n\n"
+            "لطفاً نوع پیام را انتخاب کنید:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📝 متن", callback_data="post_text")],
+                [InlineKeyboardButton("🖼 عکس", callback_data="post_photo")],
+                [InlineKeyboardButton("🎥 ویدیو", callback_data="post_video")],
+                [InlineKeyboardButton("📄 سند", callback_data="post_document")]
+            ])
         )
+        return POST_MESSAGE_SETUP
+    
+    if data == "del_post":
+        post_data = context.user_data.get('post_message', {})
+        if 'category_id' in post_data:
+            await bot_manager.db.delete_post_message(post_data['category_id'])
+            await query.edit_message_text(
+                "✅ پیام پس از ارسال حذف شد!",
+                reply_markup=MAIN_MENU
+            )
+        elif 'is_global' in post_data:
+            await bot_manager.db.set_post_message(None, 'text', '', is_global=True)
+            await query.edit_message_text(
+                "✅ پیام سراسری حذف شد!",
+                reply_markup=MAIN_MENU
+            )
         return ConversationHandler.END
     
-    if action == 'post_text':
+    context.user_data['post_message']['type'] = data
+    msg_type = data.replace('post_', '')
+    
+    if msg_type == 'text':
         await query.edit_message_text(
             "لطفاً متن پیام را ارسال کنید:",
             reply_markup=BACK_MENU
@@ -1064,7 +1086,7 @@ async def handle_post_message_type(update: Update, context: ContextTypes.DEFAULT
     
     # برای مدیاها نیاز به ارسال فایل داریم
     await query.edit_message_text(
-        f"لطفاً {'عکس' if 'photo' in action else 'ویدیو' if 'video' in action else 'سند'} را ارسال کنید:",
+        f"لطفاً {'عکس' if msg_type == 'photo' else 'ویدیو' if msg_type == 'video' else 'سند'} را ارسال کنید:",
         reply_markup=BACK_MENU
     )
     return AWAITING_POST_MESSAGE
@@ -1076,17 +1098,24 @@ async def save_post_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ خطا در پردازش پیام!")
         return ConversationHandler.END
     
-    msg_type = post_data['type']
-    category_id = post_data['category_id']
+    msg_type = post_data['type'].replace('post_', '')
+    is_global = post_data.get('is_global', False)
+    category_id = post_data.get('category_id')
     
     try:
         if msg_type == 'text':
             content = update.message.text
-            await bot_manager.db.set_post_message(category_id, 'text', content)
-            await update.message.reply_text(
-                "✅ متن پیام پس از ارسال ذخیره شد!",
-                reply_markup=MAIN_MENU
+            await bot_manager.db.set_post_message(
+                category_id, 
+                msg_type, 
+                content, 
+                is_global=is_global
             )
+            msg = "✅ متن پیام پس از ارسال ذخیره شد!"
+            if is_global:
+                msg = "✅ متن پیام سراسری ذخیره شد!"
+                
+            await update.message.reply_text(msg, reply_markup=MAIN_MENU)
         else:
             # استخراج فایل بر اساس نوع
             if msg_type == 'photo':
@@ -1101,12 +1130,19 @@ async def save_post_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # ذخیره کپشن اگر وجود دارد
             caption = update.message.caption or ""
             
-            await bot_manager.db.set_post_message(category_id, msg_type, file_id, caption)
-            
-            await update.message.reply_text(
-                f"✅ {'عکس' if msg_type == 'photo' else 'ویدیو' if msg_type == 'video' else 'سند'} پیام پس از ارسال ذخیره شد!",
-                reply_markup=MAIN_MENU
+            await bot_manager.db.set_post_message(
+                category_id, 
+                msg_type, 
+                file_id, 
+                caption,
+                is_global=is_global
             )
+            
+            msg = f"✅ {'عکس' if msg_type == 'photo' else 'ویدیو' if msg_type == 'video' else 'سند'} پیام پس از ارسال ذخیره شد!"
+            if is_global:
+                msg = f"✅ {'عکس' if msg_type == 'photo' else 'ویدیو' if msg_type == 'video' else 'سند'} پیام سراسری ذخیره شد!"
+            
+            await update.message.reply_text(msg, reply_markup=MAIN_MENU)
     except Exception as e:
         logger.error(f"خطا در ذخیره پیام پس از ارسال: {e}")
         await update.message.reply_text(
@@ -1157,11 +1193,57 @@ async def toggle_timer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await bot_manager.db.update_timer_settings(new_status)
     
+    # به‌روزرسانی پیام با وضعیت جدید
     status = "فعال ✅" if new_status else "غیرفعال ❌"
+    interval = settings['delete_after_seconds'] if settings else "تنظیم نشده"
+    message = settings['post_delete_message'] if settings else "تنظیم نشده"
+    
+    keyboard = [
+        [InlineKeyboardButton(f"⏱ وضعیت: {status}", callback_data="toggle_timer")],
+        [InlineKeyboardButton(f"🕒 تنظیم زمان ({interval})", callback_data="set_timer_interval")],
+        [InlineKeyboardButton("✏️ ویرایش پیام", callback_data="edit_timer_message")]
+    ]
+    
     await query.edit_message_text(
-        f"✅ وضعیت تایمر به «{status}» تغییر یافت",
-        reply_markup=MAIN_MENU
+        f"✅ وضعیت تایمر تغییر یافت!\n\n"
+        f"مدیریت تایمر خودکار:\n\n"
+        f"• وضعیت: {status}\n"
+        f"• زمان حذف: {interval} ثانیه\n"
+        f"• پیام: {message}",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
+async def set_timer_interval(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تنظیم زمان تایمر"""
+    query = update.callback_query
+    await query.answer()
+    
+    await query.edit_message_text(
+        "لطفاً زمان جدید برای حذف خودکار فایل‌ها را به ثانیه وارد کنید:\n\n"
+        "مثال: 3600 (برای 1 ساعت)",
+        reply_markup=BACK_MENU
+    )
+    return TIMER_SETTINGS
+
+async def save_timer_interval(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ذخیره زمان جدید تایمر"""
+    try:
+        seconds = int(update.message.text.strip())
+        if seconds < 60:
+            raise ValueError("زمان باید حداقل 60 ثانیه باشد")
+            
+        await bot_manager.db.update_timer_settings(None, seconds)
+        await update.message.reply_text(
+            f"✅ زمان تایمر به {seconds} ثانیه تنظیم شد",
+            reply_markup=MAIN_MENU
+        )
+        return ConversationHandler.END
+    except ValueError as e:
+        await update.message.reply_text(
+            f"❌ خطا: {str(e)}\nلطفاً عدد معتبر وارد کنید:",
+            reply_markup=BACK_MENU
+        )
+        return TIMER_SETTINGS
 
 # ========================
 # ==== UTILITY HANDLERS ===
@@ -1258,12 +1340,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith('postmsg_'):
         await setup_post_message(update, context)
     
-    elif data.startswith('delpost_'):
-        category_id = data[8:]
-        await bot_manager.db.delete_post_message(category_id)
-        await query.edit_message_text("✅ پیام پس از ارسال حذف شد!")
-    
-    elif data in ['post_text', 'post_photo', 'post_video', 'post_document']:
+    elif data in ['post_text', 'post_photo', 'post_video', 'post_document', 'global_post', 'del_post']:
         await handle_post_message_type(update, context)
     
     # مدیریت کانال‌ها
@@ -1315,6 +1392,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # مدیریت تایمر
     elif data == "toggle_timer":
         await toggle_timer(update, context)
+    
+    elif data == "set_timer_interval":
+        await set_timer_interval(update, context)
+    
+    elif data == "edit_timer_message":
+        await query.edit_message_text(
+            "لطفاً پیام جدید برای تایمر را وارد کنید:",
+            reply_markup=BACK_MENU
+        )
+        return TIMER_SETTINGS
 
 # ========================
 # === WEB SERVER SETUP ===
@@ -1361,10 +1448,15 @@ async def setup_bot():
     
     # دستورات اصلی
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("finish_upload", finish_upload))
+    application.add_handler(CommandHandler("cancel", cancel))
     
     # مدیریت دسته‌ها
     category_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^📁 ساخت دسته جدید$"), new_category)],
+        entry_points=[
+            MessageHandler(filters.Regex("^📁 ساخت دسته جدید$"), new_category),
+            CallbackQueryHandler(new_category, pattern="^new_category$")
+        ],
         states={
             AWAITING_CATEGORY_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_category)]
         },
@@ -1394,14 +1486,26 @@ async def setup_bot():
     application.add_handler(upload_handler)
     
     # تایمر خودکار
-    application.add_handler(MessageHandler(filters.Regex("^⏱ تایمر خودکار$"), timer_management))
-    application.add_handler(CallbackQueryHandler(toggle_timer, pattern="^toggle_timer$"))
+    timer_handler = ConversationHandler(
+        entry_points=[
+            MessageHandler(filters.Regex("^⏱ تایمر خودکار$"), timer_management),
+            CallbackQueryHandler(timer_management, pattern="^timer_management$")
+        ],
+        states={
+            TIMER_SETTINGS: [
+                MessageHandler(filters.TEXT, save_timer_interval),
+                CallbackQueryHandler(timer_management)
+            ]
+        },
+        fallbacks=[CommandHandler("cancel", cancel)]
+    )
+    application.add_handler(timer_handler)
     
     # مدیریت کانال‌ها
     channel_handler = ConversationHandler(
         entry_points=[
             MessageHandler(filters.Regex("^📢 تنظیم کانال اجباری$"), channel_management),
-            CallbackQueryHandler(start_add_channel, pattern="^add_channel$")
+            CallbackQueryHandler(channel_management, pattern="^channel_management$")
         ],
         states={
             WAITING_CHANNEL_INFO: [
@@ -1416,11 +1520,25 @@ async def setup_bot():
     
     # مدیریت ادمین‌ها
     application.add_handler(MessageHandler(filters.Regex("^👤 مدیریت ادمین‌ها$"), admin_management))
-    application.add_handler(CallbackQueryHandler(admin_management, pattern="^admin_management$"))
+    
+    admin_id_handler = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(start_add_admin, pattern="^add_admin$"),
+            CallbackQueryHandler(start_remove_admin, pattern="^remove_admin$")
+        ],
+        states={
+            AWAITING_ADMIN_ID: [MessageHandler(filters.TEXT, handle_admin_id)]
+        },
+        fallbacks=[CommandHandler("cancel", cancel)]
+    )
+    application.add_handler(admin_id_handler)
     
     # مدیریت پیام‌های پس از ارسال
     post_message_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(setup_post_message, pattern="^postmsg_")],
+        entry_points=[
+            CallbackQueryHandler(setup_post_message, pattern="^postmsg_"),
+            CallbackQueryHandler(setup_post_message, pattern="^global_post_setup$")
+        ],
         states={
             POST_MESSAGE_SETUP: [CallbackQueryHandler(handle_post_message_type)],
             AWAITING_POST_MESSAGE: [
@@ -1434,24 +1552,8 @@ async def setup_bot():
     )
     application.add_handler(post_message_handler)
     
-    # مدیریت ادمین‌ها (اضافه/حذف)
-    admin_id_handler = ConversationHandler(
-        entry_points=[
-            CallbackQueryHandler(start_add_admin, pattern="^add_admin$"),
-            CallbackQueryHandler(start_remove_admin, pattern="^remove_admin$")
-        ],
-        states={
-            AWAITING_ADMIN_ID: [MessageHandler(filters.TEXT, handle_admin_id)]
-        },
-        fallbacks=[CommandHandler("cancel", cancel)]
-    )
-    application.add_handler(admin_id_handler)
-    
     # دکمه‌های اینلاین
     application.add_handler(CallbackQueryHandler(button_handler))
-    
-    # دستور لغو عمومی
-    application.add_handler(CommandHandler("cancel", cancel))
     
     return application
 
