@@ -931,9 +931,25 @@ async def run_telegram_bot():
     
     # اجرای ربات
     logger.info("Starting Telegram bot...")
-    await application.initialize()
-    await application.start()
-    await application.run_polling()
+    try:
+        # دریافت یوزرنیم ربات
+        bot = application.bot
+        me = await bot.get_me()
+        bot_username = me.username
+        logger.info(f"Bot username: @{bot_username}")
+        await bot_manager.init(bot_username)
+        
+        # اضافه کردن تمام handlers (کدهای قبلی شما)
+        application.add_handler(CommandHandler("start", start))
+        # ... بقیه handlers
+        
+        # اجرای ربات
+        logger.info("Starting Telegram bot...")
+        await application.run_polling()
+        
+    except Exception as e:
+        logger.error(f"Bot error: {e}")
+        raise
     
     # نگه داشتن ربات در حالت اجرا
     while True:
