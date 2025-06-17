@@ -851,6 +851,14 @@ async def keep_alive():
 # ==== BOT SETUP =========
 # ========================
 
+async def post_init(application: Application) -> None:
+    """تنظیم webhook بعد از راه‌اندازی"""
+    await application.bot.set_webhook(
+        url=WEBHOOK_URL + WEBHOOK_PATH,
+        drop_pending_updates=True
+    )
+    logger.info(f"Webhook set to: {WEBHOOK_URL}{WEBHOOK_PATH}")
+
 async def setup_bot():
     """تنظیم و اجرای ربات با Webhook"""
     # ایجاد برنامه تلگرام
