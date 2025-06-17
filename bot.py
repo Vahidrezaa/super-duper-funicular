@@ -9,10 +9,7 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
-    ReplyKeyboardMarkup,
-    InputMediaPhoto,
-    InputMediaVideo,
-    InputMediaDocument
+    ReplyKeyboardMarkup
 )
 from telegram.ext import (
     Application,
@@ -53,11 +50,6 @@ MAIN_MENU = ReplyKeyboardMarkup(
     input_field_placeholder="لطفا یک گزینه را انتخاب کنید"
 )
 
-USER_MENU = ReplyKeyboardMarkup(
-    [["🔍 جستجوی فایل‌ها", "❓ راهنما"]],
-    resize_keyboard=True
-)
-
 BACK_MENU = ReplyKeyboardMarkup(
     [["↩️ بازگشت به منوی اصلی"]],
     resize_keyboard=True
@@ -66,9 +58,8 @@ BACK_MENU = ReplyKeyboardMarkup(
 # حالت‌های گفتگو
 (
     UPLOADING, WAITING_CHANNEL_INFO, AWAITING_CATEGORY_NAME,
-    CATEGORY_MANAGEMENT, TIMER_SETTINGS, POST_MESSAGE_SETUP,
-    AWAITING_POST_MESSAGE, AWAITING_POST_CAPTION
-) = range(8)
+    POST_MESSAGE_SETUP, AWAITING_POST_MESSAGE, AWAITING_ADMIN_ID
+) = range(6)
 
 class Database:
     """مدیریت دیتابیس PostgreSQL"""
@@ -334,7 +325,7 @@ class Database:
         """حذف ادمین"""
         async with self.pool.acquire() as conn:
             await conn.execute(
-                "DELETE FROM admins WHERE user_id = $1 AND is_super = FALSE",
+                "DELETE FROM admins WHERE user_id = $1",
                 user_id
             )
     
@@ -345,6 +336,19 @@ class Database:
                 "SELECT EXISTS(SELECT 1 FROM admins WHERE user_id = $1)",
                 user_id
             )
+    
+    async def is_super_admin(self, user_id: int) -> bool:
+        """بررسی سوپر ادمین بودن کاربر"""
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval(
+                "SELECT is_super FROM admins WHERE user_id = $1",
+                user_id
+            )
+    
+    async def get_admins(self) -> list:
+        """دریافت لیست ادمین‌ها"""
+        async with self.pool.acquire() as conn:
+            return await conn.fetch("SELECT user_id, is_super FROM admins")
     
     # --- مدیریت پیام‌های پس از ارسال ---
     async def set_post_message(self, category_id: str, message_type: str, content: str, caption: str = None):
@@ -374,7 +378,6 @@ class BotManager:
     def __init__(self):
         self.db = Database()
         self.bot_username = None
-        self.user_data = {}
     
     async def init(self, bot_username: str):
         """راه‌اندازی اولیه"""
@@ -388,6 +391,10 @@ class BotManager:
     async def is_admin(self, user_id: int) -> bool:
         """بررسی ادمین بودن کاربر"""
         return await self.db.is_admin(user_id)
+    
+    async def is_super_admin(self, user_id: int) -> bool:
+        """بررسی سوپر ادمین بودن کاربر"""
+        return await self.db.is_super_admin(user_id)
     
     def generate_link(self, category_id: str) -> str:
         """تولید لینک دسته با یوزرنیم صحیح"""
@@ -490,20 +497,7 @@ bot_manager = BotManager()
 # ========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """دستور شروع برای ادمین‌ها"""
-    user_id = update.effective_user.id
-    
-    if await bot_manager.is_admin(user_id):
-        await update.message.reply_text(
-            "👋 سلام ادمین!\n\n"
-            "از منوی زیر انتخاب کنید:",
-            reply_markup=MAIN_MENU
-        )
-    else:
-        await user_start(update, context)
-
-async def user_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """دستور شروع برای کاربران عادی"""
+    """دستور شروع برای تمام کاربران"""
     user_id = update.effective_user.id
     
     # دسترسی از طریق لینک دسته
@@ -512,9 +506,18 @@ async def user_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_category(update, context, category_id)
         return
     
+    # برای کاربران عادی فقط پیام خوش‌آمدگویی
+    if not await bot_manager.is_admin(user_id):
+        await update.message.reply_text(
+            "👋 سلام! برای دریافت فایل‌ها از لینک‌ها استفاده کنید."
+        )
+        return
+    
+    # برای ادمین‌ها منوی اصلی
     await update.message.reply_text(
-        "👋 سلام! برای دریافت فایل‌ها از لینک‌ها استفاده کنید.",
-        reply_markup=USER_MENU
+        "👋 سلام ادمین!\n\n"
+        "از منوی زیر انتخاب کنید:",
+        reply_markup=MAIN_MENU
     )
 
 async def handle_category(update: Update, context: ContextTypes.DEFAULT_TYPE, category_id: str):
@@ -903,6 +906,113 @@ async def list_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(message, reply_markup=MAIN_MENU)
 
 # ========================
+# ==== ADMIN MANAGEMENT ===
+# ========================
+
+async def admin_management(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """مدیریت ادمین‌ها"""
+    user_id = update.effective_user.id
+    if not await bot_manager.is_admin(user_id):
+        await update.message.reply_text("❌ دسترسی ممنوع!")
+        return
+    
+    # فقط سوپر ادمین‌ها می‌توانند ادمین مدیریت کنند
+    if not await bot_manager.is_super_admin(user_id):
+        await update.message.reply_text("❌ فقط سوپر ادمین‌ها می‌توانند ادمین‌ها را مدیریت کنند!")
+        return
+    
+    keyboard = [
+        [InlineKeyboardButton("➕ افزودن ادمین", callback_data="add_admin")],
+        [InlineKeyboardButton("➖ حذف ادمین", callback_data="remove_admin")],
+        [InlineKeyboardButton("👥 لیست ادمین‌ها", callback_data="list_admins")]
+    ]
+    
+    await update.message.reply_text(
+        "مدیریت ادمین‌ها:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def list_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """نمایش لیست ادمین‌ها"""
+    query = update.callback_query
+    await query.answer()
+    
+    admins = await bot_manager.db.get_admins()
+    if not admins:
+        await query.edit_message_text("👤 هیچ ادمینی وجود ندارد!")
+        return
+    
+    message = "👥 لیست ادمین‌ها:\n\n"
+    for admin in admins:
+        message += f"• آیدی: {admin['user_id']}\n"
+        message += f"  سوپر ادمین: {'✅' if admin['is_super'] else '❌'}\n\n"
+    
+    await query.edit_message_text(message)
+
+async def start_add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """شروع افزودن ادمین جدید"""
+    query = update.callback_query
+    await query.answer()
+    
+    await query.edit_message_text(
+        "لطفاً آیدی کاربر را وارد کنید:",
+        reply_markup=BACK_MENU
+    )
+    return AWAITING_ADMIN_ID
+
+async def start_remove_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """شروع حذف ادمین"""
+    query = update.callback_query
+    await query.answer()
+    
+    await query.edit_message_text(
+        "لطفاً آیدی ادمین را وارد کنید:",
+        reply_markup=BACK_MENU
+    )
+    return AWAITING_ADMIN_ID
+
+async def handle_admin_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """پردازش آیدی ادمین"""
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+    
+    # فقط سوپر ادمین‌ها می‌توانند ادمین مدیریت کنند
+    if not await bot_manager.is_super_admin(user_id):
+        await update.message.reply_text("❌ فقط سوپر ادمین‌ها می‌توانند ادمین‌ها را مدیریت کنند!")
+        return ConversationHandler.END
+    
+    try:
+        admin_id = int(text)
+    except ValueError:
+        await update.message.reply_text("❌ فرمت آیدی نامعتبر! لطفاً عدد وارد کنید.")
+        return AWAITING_ADMIN_ID
+    
+    # تشخیص نوع عملیات از context
+    if 'admin_action' in context.user_data:
+        action = context.user_data['admin_action']
+        
+        if action == 'add_admin':
+            # افزودن ادمین جدید (غیر سوپر)
+            await bot_manager.db.add_admin(admin_id, False, user_id)
+            await update.message.reply_text(
+                f"✅ کاربر {admin_id} به عنوان ادمین افزوده شد.",
+                reply_markup=MAIN_MENU
+            )
+        elif action == 'remove_admin':
+            # حذف ادمین (به جز سوپر ادمین‌ها)
+            if admin_id in ADMIN_IDS:
+                await update.message.reply_text("❌ نمی‌توانید سوپر ادمین اصلی را حذف کنید!")
+                return ConversationHandler.END
+                
+            await bot_manager.db.remove_admin(admin_id)
+            await update.message.reply_text(
+                f"✅ ادمین {admin_id} با موفقیت حذف شد.",
+                reply_markup=MAIN_MENU
+            )
+    
+    return ConversationHandler.END
+
+# ========================
 # === POST MESSAGE SYSTEM =
 # ========================
 
@@ -925,7 +1035,6 @@ async def setup_post_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.edit_message_text(
         "لطفاً نوع پیام پس از ارسال را انتخاب کنید:",
         reply_markup=InlineKeyboardMarkup(keyboard)
-    )
     return POST_MESSAGE_SETUP
 
 async def handle_post_message_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -936,8 +1045,8 @@ async def handle_post_message_type(update: Update, context: ContextTypes.DEFAULT
     action = query.data
     context.user_data['post_message']['type'] = action.split('_')[1]
     
-    if action == 'delpost':
-        category_id = query.data.split('_')[1]
+    if action.startswith('delpost'):
+        category_id = action.split('_')[1]
         await bot_manager.db.delete_post_message(category_id)
         await query.edit_message_text(
             "✅ پیام پس از ارسال حذف شد!",
@@ -1009,6 +1118,51 @@ async def save_post_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # ========================
+# === TIMER MANAGEMENT ===
+# ========================
+
+async def timer_management(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """مدیریت تایمر خودکار"""
+    if not await bot_manager.is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ دسترسی ممنوع!")
+        return
+    
+    settings = await bot_manager.db.get_timer_settings()
+    status = "فعال ✅" if settings and settings['is_active'] else "غیرفعال ❌"
+    interval = settings['delete_after_seconds'] if settings else "تنظیم نشده"
+    message = settings['post_delete_message'] if settings else "تنظیم نشده"
+    
+    keyboard = [
+        [InlineKeyboardButton(f"⏱ وضعیت: {status}", callback_data="toggle_timer")],
+        [InlineKeyboardButton(f"🕒 تنظیم زمان ({interval})", callback_data="set_timer_interval")],
+        [InlineKeyboardButton("✏️ ویرایش پیام", callback_data="edit_timer_message")]
+    ]
+    
+    await update.message.reply_text(
+        f"مدیریت تایمر خودکار:\n\n"
+        f"• وضعیت: {status}\n"
+        f"• زمان حذف: {interval} ثانیه\n"
+        f"• پیام: {message}",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def toggle_timer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تغییر وضعیت تایمر"""
+    query = update.callback_query
+    await query.answer()
+    
+    settings = await bot_manager.db.get_timer_settings()
+    new_status = not settings['is_active'] if settings else True
+    
+    await bot_manager.db.update_timer_settings(new_status)
+    
+    status = "فعال ✅" if new_status else "غیرفعال ❌"
+    await query.edit_message_text(
+        f"✅ وضعیت تایمر به «{status}» تغییر یافت",
+        reply_markup=MAIN_MENU
+    )
+
+# ========================
 # ==== UTILITY HANDLERS ===
 # ========================
 
@@ -1019,6 +1173,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.pop('channel_id', None)
     context.user_data.pop('channel_name', None)
     context.user_data.pop('post_message', None)
+    context.user_data.pop('admin_action', None)
     
     await update.message.reply_text("❌ عملیات لغو شد.", reply_markup=MAIN_MENU)
     return ConversationHandler.END
@@ -1087,7 +1242,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "📤 فایل‌ها را ارسال کنید.\n"
             "برای پایان: /finish_upload\n"
-            "برای لغو: /cancel")
+            "برای لغو: /cancel"
+        )
         return UPLOADING
     
     elif data.startswith('delcat_'):
@@ -1142,51 +1298,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("✅ کانال با موفقیت حذف شد!")
         else:
             await query.edit_message_text("❌ خطا در حذف کانال!")
-
-# ========================
-# === TIMER MANAGEMENT ===
-# ========================
-
-async def timer_management(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """مدیریت تایمر خودکار"""
-    if not await bot_manager.is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ دسترسی ممنوع!")
-        return
     
-    settings = await bot_manager.db.get_timer_settings()
-    status = "فعال ✅" if settings and settings['is_active'] else "غیرفعال ❌"
-    interval = settings['delete_after_seconds'] if settings else "تنظیم نشده"
-    message = settings['post_delete_message'] if settings else "تنظیم نشده"
+    # مدیریت ادمین‌ها
+    elif data == "add_admin":
+        context.user_data['admin_action'] = 'add_admin'
+        await start_add_admin(update, context)
     
-    keyboard = [
-        [InlineKeyboardButton(f"⏱ وضعیت: {status}", callback_data="toggle_timer")],
-        [InlineKeyboardButton(f"🕒 تنظیم زمان ({interval})", callback_data="set_timer_interval")],
-        [InlineKeyboardButton("✏️ ویرایش پیام", callback_data="edit_timer_message")]
-    ]
+    elif data == "remove_admin":
+        context.user_data['admin_action'] = 'remove_admin'
+        await start_remove_admin(update, context)
     
-    await update.message.reply_text(
-        f"مدیریت تایمر خودکار:\n\n"
-        f"• وضعیت: {status}\n"
-        f"• زمان حذف: {interval} ثانیه\n"
-        f"• پیام: {message}",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def toggle_timer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تغییر وضعیت تایمر"""
-    query = update.callback_query
-    await query.answer()
+    elif data == "list_admins":
+        await list_admins(update, context)
     
-    settings = await bot_manager.db.get_timer_settings()
-    new_status = not settings['is_active'] if settings else True
-    
-    await bot_manager.db.update_timer_settings(new_status)
-    
-    status = "فعال ✅" if new_status else "غیرفعال ❌"
-    await query.edit_message_text(
-        f"✅ وضعیت تایمر به «{status}» تغییر یافت",
-        reply_markup=MAIN_MENU
-    )
+    # مدیریت تایمر
+    elif data == "toggle_timer":
+        await toggle_timer(update, context)
 
 # ========================
 # === WEB SERVER SETUP ===
@@ -1286,16 +1413,38 @@ async def setup_bot():
     )
     application.add_handler(channel_handler)
     
+    # مدیریت ادمین‌ها
+    application.add_handler(MessageHandler(filters.Regex("^👤 مدیریت ادمین‌ها$"), admin_management))
+    application.add_handler(CallbackQueryHandler(admin_management, pattern="^admin_management$"))
+    
     # مدیریت پیام‌های پس از ارسال
     post_message_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(setup_post_message, pattern="^postmsg_")],
         states={
             POST_MESSAGE_SETUP: [CallbackQueryHandler(handle_post_message_type)],
-            AWAITING_POST_MESSAGE: [MessageHandler(filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL, save_post_message)]
+            AWAITING_POST_MESSAGE: [
+                MessageHandler(
+                    filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL,
+                    save_post_message
+                )
+            ]
         },
         fallbacks=[CommandHandler("cancel", cancel)]
     )
     application.add_handler(post_message_handler)
+    
+    # مدیریت ادمین‌ها (اضافه/حذف)
+    admin_id_handler = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(start_add_admin, pattern="^add_admin$"),
+            CallbackQueryHandler(start_remove_admin, pattern="^remove_admin$")
+        ],
+        states={
+            AWAITING_ADMIN_ID: [MessageHandler(filters.TEXT, handle_admin_id)]
+        },
+        fallbacks=[CommandHandler("cancel", cancel)]
+    )
+    application.add_handler(admin_id_handler)
     
     # دکمه‌های اینلاین
     application.add_handler(CallbackQueryHandler(button_handler))
