@@ -2,6 +2,7 @@ import os
 import logging
 import uuid
 import asyncio
+import asyncpg
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Message, ReplyKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -12,16 +13,17 @@ from telegram.ext import (
     filters,
     ConversationHandler
 )
-import asyncpg
 from dotenv import load_dotenv
 from aiohttp import web
 import aiohttp
-from telegram.ext import Application
 
 # تنظیمات محیطی
 load_dotenv()
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 ADMIN_IDS = [int(id) for id in os.getenv('ADMIN_IDS', '').split(',') if id]
+WEBHOOK_URL = os.getenv('WEBHOOK_URL')
+WEBHOOK_PATH = f"/{BOT_TOKEN}"
+PORT = int(os.getenv('PORT', 8080))
 
 # تنظیمات لاگ
 logging.basicConfig(
@@ -50,7 +52,7 @@ BACK_MENU = ReplyKeyboardMarkup(
 UPLOADING, WAITING_CHANNEL_INFO, AWAITING_CATEGORY_NAME = range(3)
 
 class Database:
-    """مدیریت دیتابیس PostgreSQL بهینه‌شده"""
+    """مدیریت دیتابیس PostgreSQL"""
     
     def __init__(self):
         self.pool = None
@@ -835,7 +837,7 @@ async def keep_alive():
     while True:
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get("https://uploader-bot-ely6.onrender.com") as resp:
+                async with session.get(WEBHOOK_URL + "/health") as resp:
                     if resp.status == 200:
                         logger.info("✅ Keep-alive ping sent successfully")
                     else:
@@ -843,30 +845,15 @@ async def keep_alive():
         except Exception as e:
             logger.warning(f"⚠️ Keep-alive exception: {e}")
         
-        await asyncio.sleep(450)  # هر ۵ دقیقه (۳۰۰ ثانیه)
-
-
-async def run_web_server():
-    """اجرای سرور وب ساده"""
-    app = web.Application()
-    app.router.add_get('/health', health_check)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.getenv('PORT',10000))
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
-    logger.info("Web server started at port 10000")
-    
-    # اجرای نامحدود
-    while True:
-        await asyncio.sleep(3600)
+        await asyncio.sleep(300)  # هر 5 دقیقه
 
 # ========================
 # ==== BOT SETUP =========
 # ========================
 
-async def run_telegram_bot():
-    """اجرای اصلی ربات تلگرام"""
+async def setup_bot():
+    """تنظیم و اجرای ربات با Webhook"""
+    # ایجاد برنامه تلگرام
     application = Application.builder().token(BOT_TOKEN).build()
     
     # دریافت یوزرنیم ربات
@@ -929,39 +916,51 @@ async def run_telegram_bot():
     # دکمه‌های اینلاین
     application.add_handler(CallbackQueryHandler(button_handler))
     
-    # اجرای ربات
-    logger.info("Starting Telegram bot...")
-    try:
-        # دریافت یوزرنیم ربات
-        bot = application.bot
-        me = await bot.get_me()
-        bot_username = me.username
-        logger.info(f"Bot username: @{bot_username}")
-        await bot_manager.init(bot_username)
-        
-        # اضافه کردن تمام handlers (کدهای قبلی شما)
-        application.add_handler(CommandHandler("start", start))
-        # ... بقیه handlers
-        
-        # اجرای ربات
-        logger.info("Starting Telegram bot...")
-        await application.run_polling()
-        
-    except Exception as e:
-        logger.error(f"Bot error: {e}")
-        raise
+    # تنظیم Webhook
+    await application.bot.set_webhook(
+        url=WEBHOOK_URL + WEBHOOK_PATH,
+        drop_pending_updates=True
+    )
+    logger.info(f"Webhook set to: {WEBHOOK_URL}{WEBHOOK_PATH}")
     
-    # نگه داشتن ربات در حالت اجرا
+    return application
+
+async def webhook_handler(request):
+    """مدیریت درخواست‌های Webhook"""
+    application = request.app['bot_application']
+    data = await request.json()
+    update = Update.de_json(data, application.bot)
+    await application.process_update(update)
+    return web.Response()
+
+async def run_web_server():
+    """اجرای سرور وب و تنظیم Webhook"""
+    # ساخت برنامه وب
+    app = web.Application()
+    app.router.add_get('/health', health_check)
+    app.router.add_post(WEBHOOK_PATH, webhook_handler)
+    
+    # تنظیم ربات
+    application = await setup_bot()
+    app['bot_application'] = application
+    
+    # اجرای وظیفه keep_alive در پس‌زمینه
+    asyncio.create_task(keep_alive())
+    
+    # اجرای سرور
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+    logger.info(f"Web server started at port {PORT}")
+    
+    # نگه داشتن برنامه در حال اجرا
     while True:
         await asyncio.sleep(3600)
 
 async def main():
-    """اجرای همزمان سرور وب و ربات تلگرام"""
-    await asyncio.gather(
-        run_web_server(),
-        run_telegram_bot(),
-        keep_alive()
-    )
+    """اجرای اصلی برنامه"""
+    await run_web_server()
 
 if __name__ == '__main__':
     try:
