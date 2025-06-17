@@ -1291,7 +1291,7 @@ async def setup_bot():
         entry_points=[CallbackQueryHandler(setup_post_message, pattern="^postmsg_")],
         states={
             POST_MESSAGE_SETUP: [CallbackQueryHandler(handle_post_message_type)],
-            AWAITING_POST_MESSAGE: [MessageHandler(filters.TEXT | filters.PHOTO | filters.VIDEO | filters.DOCUMENT, save_post_message)]
+            AWAITING_POST_MESSAGE: [MessageHandler(filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL, save_post_message)]
         },
         fallbacks=[CommandHandler("cancel", cancel)]
     )
