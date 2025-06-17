@@ -847,10 +847,6 @@ async def keep_alive():
         
         await asyncio.sleep(300)  # هر 5 دقیقه
 
-# ========================
-# ==== BOT SETUP =========
-# ========================
-
 async def post_init(application: Application) -> None:
     """تنظیم webhook بعد از راه‌اندازی"""
     await application.bot.set_webhook(
@@ -862,7 +858,13 @@ async def post_init(application: Application) -> None:
 async def setup_bot():
     """تنظیم و اجرای ربات با Webhook"""
     # ایجاد برنامه تلگرام
-    application = Application.builder().token(BOT_TOKEN).updater(None).post_init(post_init).build()
+    application = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .updater(None)  # غیرفعال کردن کامل Updater
+        .post_init(post_init)  # تنظیم webhook بعد از راه‌اندازی
+        .build()
+    )
     
     # دریافت یوزرنیم ربات
     await application.initialize()
@@ -924,33 +926,26 @@ async def setup_bot():
     # دکمه‌های اینلاین
     application.add_handler(CallbackQueryHandler(button_handler))
     
-    # تنظیم Webhook
-    await application.bot.set_webhook(
-        url=WEBHOOK_URL + WEBHOOK_PATH,
-        drop_pending_updates=True
-    )
-    logger.info(f"Webhook set to: {WEBHOOK_URL}{WEBHOOK_PATH}")
-    
     return application
-
-async def webhook_handler(request):
-    """مدیریت درخواست‌های Webhook"""
-    application = request.app['bot_application']
-    data = await request.json()
-    update = Update.de_json(data, application.bot)
-    await application.process_update(update)
-    return web.Response()
 
 async def run_web_server():
     """اجرای سرور وب و تنظیم Webhook"""
+    # تنظیم ربات
+    application = await setup_bot()
+    
     # ساخت برنامه وب
     app = web.Application()
     app.router.add_get('/health', health_check)
-    app.router.add_post(WEBHOOK_PATH, webhook_handler)
     
-    # تنظیم ربات
-    application = await setup_bot()
-    app['bot_application'] = application
+    # تعریف هندلر وب‌هوک
+    async def webhook_handler(request):
+        """مدیریت درخواست‌های Webhook"""
+        data = await request.json()
+        update = Update.de_json(data, application.bot)
+        await application.process_update(update)
+        return web.Response()
+    
+    app.router.add_post(WEBHOOK_PATH, webhook_handler)
     
     # اجرای وظیفه keep_alive در پس‌زمینه
     asyncio.create_task(keep_alive())
@@ -968,8 +963,7 @@ async def run_web_server():
 
 async def main():
     """اجرای اصلی برنامه"""
-    application = await setup_bot()
-    await run_web_server(application)
+    await run_web_server()
 
 if __name__ == '__main__':
     try:
